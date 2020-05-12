@@ -18,6 +18,7 @@ $ FILE_LOCATION=./test_data.fit ./fit
 - [ ] Finalize/document the API.
 - [ ] Finalize/document the CLI.
 - [ ] Implement gRPC and HTTP web servers.
+- [ ] Implement encoder.
 
 ## references
 [FIT SDK 21.30.00](https://www.thisisant.com/resources/fit-sdk/)
