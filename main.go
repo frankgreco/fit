@@ -425,24 +425,17 @@ func (f *File) ReadAndUnmarshal(r io.Reader) (int, error) {
 	return totalBytesRead, nil
 }
 
-func main() {
-	rawFile, err := os.Open(os.Getenv("FILE_LOCATION"))
+func Decode(fileLocation string) (*File, error) {
+	rawFile, err := os.Open(fileLocation)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
-		os.Exit(1)
+		return nil, err
 	}
 	defer rawFile.Close()
 
 	fitFile := new(File)
 	if _, err := fitFile.ReadAndUnmarshal(rawFile); err != nil && err != io.EOF {
-		fmt.Fprintln(os.Stderr, err.Error())
-		os.Exit(1)
+		return nil, err
 	}
 
-	data, err := json.Marshal(fitFile)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
-		os.Exit(1)
-	}
-	fmt.Println(string(data))
+	return fitFile, nil
 }

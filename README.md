@@ -7,7 +7,7 @@ This project provides an encoder/decoder for the _Flexible and Interoperable Dat
 ## usage
 ```
 $ go build
-$ FILE_LOCATION=./test_data.fit ./fit
+$ ./fit decode -f test_data.fit
 ```
 
 ## todo
