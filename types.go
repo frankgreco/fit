@@ -1,11 +1,10 @@
 package main
 
-type DataRecordHeaderType int
-type DataRecordMessageType int
+import "errors"
 
 type File struct {
-	Header      *FileHeader  `json:"header,omitempty"`
-	DataRecords []DataRecord `json:"data_records"`
+	Header  *FileHeader  `json:"header"`
+	Records []DataRecord `json:"records"`
 }
 
 type FileHeader struct {
@@ -27,29 +26,25 @@ type DataRecordHeader struct {
 	Type             DataRecordHeaderType  `json:"type"`
 	LocalMessageType uint8                 `json:"local_message_type"`
 	MessageType      DataRecordMessageType `json:"message_type,omitempty"`
-	DeveloperData    bool                  `json:"developer_data,omitempty"`
+	DeveloperData    bool                  `json:"developer_data"`
 	TimeOffset       uint8                 `json:"time_offset"`
 }
 
+type FieldDefinitions []FieldDefinition
+
 type DefinitionMessage struct {
-	FixedContent    *DefinitionMessageFixedContent    `json:"fixed_content"`
-	VariableContent *DefinitionMessageVariableContent `json:"variable_content"`
-}
-
-type DefinitionMessageFixedContent struct {
-	Architecture        uint8  `json:"architecture"`
-	GlobalMessageNumber uint16 `json:"global_message_number"`
-	NumFields           uint8  `json:"num_fields"`
-}
-
-type DefinitionMessageVariableContent struct {
-	Fields []FieldDefinition `json:"fields"`
+	Architecture      uint8             `json:"architecture"`
+	GlobalMessageType GlobalMessageType `json:"global_message_type"`
+	NumFields         uint8             `json:"num_fields"`
+	Fields            FieldDefinitions  `json:"fields"`
 }
 
 type FieldDefinition struct {
-	Number   uint8    `json:"number"`
-	Size     uint8    `json:"size"`
-	BaseType BaseType `json:"base_type"`
+	Type               DataRecordFieldType `json:"type"`
+	Number             uint8               `json:"number"`
+	Size               uint8               `json:"size"`
+	BaseType           *BaseType           `json:"base_type,omitempty"`
+	DeveloperDataIndex uint8               `json:"developer_data_index"`
 }
 
 type BaseType struct {
@@ -58,8 +53,17 @@ type BaseType struct {
 }
 
 type DataMessage struct {
-	Fields []uint64 `json:"fields"`
+	NormalFields    []uint64 `json:"normal_fields"`
+	DeveloperFields [][]byte `json:"developer_fields"`
 }
+
+type DataRecordHeaderType int
+
+type DataRecordMessageType int
+
+type DataRecordFieldType int
+
+type GlobalMessageType int
 
 const (
 	DataRecordHeaderType_Normal DataRecordHeaderType = iota
@@ -67,4 +71,30 @@ const (
 
 	DataRecordMessageType_Definition DataRecordMessageType = iota
 	DataRecordMessageType_Data
+
+	DataRecordFieldType_Developer DataRecordFieldType = iota
+	DataRecordFieldType_Normal
+
+	GlobalMessageType_FileID GlobalMessageType = iota
+	GlobalMessageType_Capabilities
+	GlobalMessageType_Unknown
+)
+
+var (
+	GlobalMessageNumber_Types = map[uint16]GlobalMessageType{
+		0: GlobalMessageType_FileID,
+		1: GlobalMessageType_Capabilities,
+	}
+
+	GlobalMessageType_Names = map[GlobalMessageType]string{
+		GlobalMessageType_FileID:       "FILE_ID",
+		GlobalMessageType_Capabilities: "CAPABILITIES",
+	}
+
+	ErrorTypeNotDefined  = errors.New("type not defined")
+	ErrorMalformedBuffer = errors.New("malformed buffer")
+
+	ContextKeyDataRecordHeader        = "DATA_RECORD_HEADER"
+	ContextKeyDataRecordFieldType     = "DATA_RECORD_FIELD_TYPE"
+	ContextKeyCurrentDefinitionRecord = "CURRENT_DEFINITION_RECORD"
 )

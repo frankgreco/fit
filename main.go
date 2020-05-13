@@ -112,82 +112,49 @@ func (h *DataRecordHeader) Unmarshal(data []byte) error {
 func (m *DefinitionMessage) DataMessageSize() int64 {
 	size := int64(0)
 
-	for _, feildDefinition := range m.VariableContent.Fields {
+	for _, feildDefinition := range m.Fields {
 		size += int64(feildDefinition.Size)
 	}
 
 	return size
 }
 
-func (c *DefinitionMessageFixedContent) Unmarshal(data []byte) error {
-	if data == nil || len(data) != 5 {
-		return errors.New("a definition message fixed content must be exactly 5 bytes")
-	}
-	c.Architecture = data[1]
-	c.GlobalMessageNumber = binary.BigEndian.Uint16(data[2:4])
-	c.NumFields = data[4]
-	return nil
-}
-
-func (c *DefinitionMessageVariableContent) Unmarshal(data []byte) error {
-	if c == nil || data == nil || len(data)%3 != 0 {
-		return errors.New("a definition message variable content must be a multiple of 3")
-	}
-	c.Fields = make([]FieldDefinition, len(data)/3)
-
-	for i := 0; i < len(data); i += 3 {
-		baseTypeExploded := ExplodeByte(uint8(data[i+2]))
-
-		baseTypeNumber, err := strconv.ParseInt(string(baseTypeExploded[3:8]), 2, 8)
-		if err != nil {
-			return err
-		}
-
-		endianAbility, err := strconv.ParseInt(string(baseTypeExploded[0:1]), 2, 8)
-		if err != nil {
-			return err
-		}
-
-		c.Fields[i/3] = FieldDefinition{
-			Number: uint8(data[i]),
-			Size:   uint8(data[i+1]),
-			BaseType: BaseType{
-				Number:        uint8(baseTypeNumber),
-				EndianAbility: uint8(endianAbility),
-			},
-		}
-	}
-
-	return nil
-}
-
 func (m *DataMessage) Unmarshal(def *DefinitionMessage, data []byte) error {
 	if m == nil || def == nil || int64(len(data)) != def.DataMessageSize() {
-		return errors.New("data message size incorrect") // TODO: better error message
+		return ErrorMalformedBuffer
 	}
 
-	m.Fields = make([]uint64, len(def.VariableContent.Fields))
+	m.NormalFields = []uint64{}
+	m.DeveloperFields = [][]byte{}
+
 	offset := 0
-	for i := 0; i < len(m.Fields); i++ {
-		switch def.VariableContent.Fields[i].BaseType.Number {
+	for i := 0; i < int(def.NumFields); i++ {
+
+		// Is this is a developer field?
+		if def.Fields[i].BaseType == nil {
+			m.DeveloperFields = append(m.DeveloperFields, data[offset:offset+int(def.Fields[i].Size)])
+			offset += int(def.Fields[i].Size)
+			continue
+		}
+
+		switch def.Fields[i].BaseType.Number {
 		case 0, 1, 2, 7, 10, 13:
-			m.Fields[i] = uint64(data[offset])
+			m.NormalFields = append(m.NormalFields, uint64(data[offset]))
 		case 3, 4, 11:
-			m.Fields[i] = uint64(binary.BigEndian.Uint16(data[offset : offset+int(def.VariableContent.Fields[i].Size)]))
+			m.NormalFields = append(m.NormalFields, uint64(binary.BigEndian.Uint16(data[offset:offset+int(def.Fields[i].Size)])))
 		case 5, 6, 8, 12:
-			m.Fields[i] = uint64(binary.BigEndian.Uint32(data[offset : offset+int(def.VariableContent.Fields[i].Size)]))
+			m.NormalFields = append(m.NormalFields, uint64(binary.BigEndian.Uint32(data[offset:offset+int(def.Fields[i].Size)])))
 		case 9, 14, 15, 16:
-			m.Fields[i] = binary.BigEndian.Uint64(data[offset : offset+int(def.VariableContent.Fields[i].Size)])
+			m.NormalFields = append(m.NormalFields, binary.BigEndian.Uint64(data[offset:offset+int(def.Fields[i].Size)]))
 		default:
 			return errors.New("unknown base type number")
 		}
-		offset += int(def.VariableContent.Fields[i].Size)
+		offset += int(def.Fields[i].Size)
 	}
 
 	return nil
 }
 
-// Unmarshal populates a Header struct from raw binary data
 func (h *FileHeader) Unmarshal(data []byte) error {
 	if data == nil || len(data) < 1 {
 		return errors.New("data must be defined")
@@ -211,7 +178,6 @@ func (h *FileHeader) Unmarshal(data []byte) error {
 	return nil
 }
 
-// ExplodeByte converts a byte into its binary string representation
 func ExplodeByte(data uint8) string {
 	var b strings.Builder
 
@@ -231,12 +197,10 @@ func (dm *DataMessage) ReadAndUnmarshal(ctx context.Context, r io.Reader) (int, 
 		return 0, errors.New("definition message is nil")
 	}
 
-	def := ctx.Value("CURRENT_DEFINITION_RECORD").(DataRecord)
-	if def.DefinitionMessage == nil || def.DefinitionMessage.VariableContent == nil {
+	def := ctx.Value(ContextKeyCurrentDefinitionRecord).(DataRecord)
+	if def.DefinitionMessage == nil {
 		return 0, errors.New("definition message must preceed a data message")
 	}
-
-	dm.Fields = []uint64{}
 
 	var totalBytesRead int
 
@@ -254,59 +218,105 @@ func (dm *DataMessage) ReadAndUnmarshal(ctx context.Context, r io.Reader) (int, 
 	return totalBytesRead, nil
 }
 
-func (dm *DefinitionMessage) ReadAndUnmarshal(ctx context.Context, r io.Reader) (int, error) {
-	if dm == nil {
-		return 0, errors.New("definition message is nil")
+func (f *FieldDefinitions) Unmarshal(ctx context.Context, data []byte) error {
+	// Each field is exactly 3 bytes.
+	numFields := len(data) / 3
+	newFields := make([]FieldDefinition, numFields)
+	isDeveloperField := false
+
+	if h, ok := ctx.Value(ContextKeyDataRecordFieldType).(DataRecordFieldType); ok && h == DataRecordFieldType_Developer {
+		isDeveloperField = true
 	}
 
+	for i := 0; i < (numFields * 3); i += 3 {
+		newFields[i/3] = FieldDefinition{
+			Number: uint8(data[i]),
+			Size:   uint8(data[i+1]),
+		}
+
+		if isDeveloperField {
+			newFields[i/3].DeveloperDataIndex = uint8(data[i+2])
+			continue
+		}
+
+		baseTypeExploded := ExplodeByte(uint8(data[i+2]))
+
+		baseTypeNumber, err := strconv.ParseInt(string(baseTypeExploded[3:8]), 2, 8)
+		if err != nil {
+			return err
+		}
+
+		endianAbility, err := strconv.ParseInt(string(baseTypeExploded[0:1]), 2, 8)
+		if err != nil {
+			return err
+		}
+
+		newFields[i/3].BaseType = &BaseType{
+			Number:        uint8(baseTypeNumber),
+			EndianAbility: uint8(endianAbility),
+		}
+	}
+
+	*f = append(*f, newFields...)
+
+	return nil
+}
+
+func (dm *DefinitionMessage) ReadAndUnmarshal(ctx context.Context, r io.Reader) (int, error) {
 	var totalBytesRead int
 
-	dm.FixedContent = new(DefinitionMessageFixedContent)
-	dm.VariableContent = new(DefinitionMessageVariableContent)
+	if dm == nil {
+		return 0, ErrorTypeNotDefined
+	}
 
-	buf := make([]byte, 5)
-	n, err := r.Read(buf)
-	totalBytesRead += n
+	fixedContentBuffer := make([]byte, 5)
+	fixedContentBytesRead, err := r.Read(fixedContentBuffer)
+	totalBytesRead += fixedContentBytesRead
 	if err != nil {
 		return totalBytesRead, err
 	}
 
-	if err := dm.FixedContent.Unmarshal(buf); err != nil {
-		return totalBytesRead, err
+	// This does not yet include developer field definitions.
+	dm.NumFields = fixedContentBuffer[4]
+	dm.Architecture = fixedContentBuffer[1]
+
+	if t, ok := GlobalMessageNumber_Types[binary.BigEndian.Uint16(fixedContentBuffer[2:4])]; !ok {
+		dm.GlobalMessageType = GlobalMessageType_Unknown
+	} else {
+		dm.GlobalMessageType = t
 	}
 
-	buf = make([]byte, int64(dm.FixedContent.NumFields)*3)
-	n, err = r.Read(buf)
-	totalBytesRead += n
+	normalFieldDefinitionsBuffer := make([]byte, int64(dm.NumFields)*3)
+	normalFieldDefinitionsBytesRead, err := r.Read(normalFieldDefinitionsBuffer)
+	totalBytesRead += normalFieldDefinitionsBytesRead
 	if err != nil {
 		return totalBytesRead, err
 	}
 
-	if err := dm.VariableContent.Unmarshal(buf); err != nil {
+	if err := dm.Fields.Unmarshal(context.WithValue(ctx, ContextKeyDataRecordFieldType, DataRecordFieldType_Normal), normalFieldDefinitionsBuffer); err != nil {
 		return totalBytesRead, err
 	}
 
-	if ctx.Value("DATA_RECORD_HEADER").(*DataRecordHeader).DeveloperData {
-		buf = make([]byte, 1)
-		n, err = r.Read(buf)
-		totalBytesRead += n
+	if h, ok := ctx.Value(ContextKeyDataRecordHeader).(*DataRecordHeader); ok && h.DeveloperData {
+		numDeveloperFieldsBuffer := make([]byte, 1)
+		numDeveloperFieldsBytesRead, err := r.Read(numDeveloperFieldsBuffer)
+		totalBytesRead += numDeveloperFieldsBytesRead
 		if err != nil {
 			return totalBytesRead, err
 		}
-		dm.FixedContent.NumFields += uint8(buf[0])
+		numDeveloperFields := numDeveloperFieldsBuffer[0]
+		dm.NumFields += uint8(numDeveloperFields)
 
-		vc := new(DefinitionMessageVariableContent)
-		buf = make([]byte, int64(buf[0])*3)
-		n, err = r.Read(buf)
-		totalBytesRead += n
+		developerFieldDefinitionsBuffer := make([]byte, int64(numDeveloperFields)*3)
+		developerFieldDefinitionsBytesRead, err := r.Read(developerFieldDefinitionsBuffer)
+		totalBytesRead += developerFieldDefinitionsBytesRead
 		if err != nil {
 			return totalBytesRead, err
 		}
 
-		if err := vc.Unmarshal(buf); err != nil {
+		if err := dm.Fields.Unmarshal(context.WithValue(ctx, ContextKeyDataRecordFieldType, DataRecordFieldType_Developer), developerFieldDefinitionsBuffer); err != nil {
 			return totalBytesRead, err
 		}
-		dm.VariableContent.Fields = append(dm.VariableContent.Fields, vc.Fields...)
 	}
 
 	return totalBytesRead, nil
@@ -314,7 +324,7 @@ func (dm *DefinitionMessage) ReadAndUnmarshal(ctx context.Context, r io.Reader) 
 
 func (dr *DataRecord) ReadAndUnmarshal(ctx context.Context, r io.Reader) (int, error) {
 	if dr == nil {
-		return 0, errors.New("data record is nil")
+		return 0, ErrorTypeNotDefined
 	}
 
 	var totalBytesRead int
@@ -335,7 +345,7 @@ func (dr *DataRecord) ReadAndUnmarshal(ctx context.Context, r io.Reader) (int, e
 	switch dr.Header.MessageType {
 	case DataRecordMessageType_Definition:
 		dr.DefinitionMessage = new(DefinitionMessage)
-		n, err := dr.DefinitionMessage.ReadAndUnmarshal(context.WithValue(context.Background(), "DATA_RECORD_HEADER", (*dr).Header), r)
+		n, err := dr.DefinitionMessage.ReadAndUnmarshal(context.WithValue(ctx, ContextKeyDataRecordHeader, (*dr).Header), r)
 		totalBytesRead += n
 		if err != nil {
 			return totalBytesRead, err
@@ -365,15 +375,15 @@ func (h *FileHeader) ReadAndUnmarshal(r io.Reader) (int, error) {
 
 func (f *File) ReadAndUnmarshal(r io.Reader) (int, error) {
 	if f == nil {
-		return 0, errors.New("file is nil")
+		return 0, ErrorTypeNotDefined
 	}
 
 	if f.Header == nil {
 		f.Header = new(FileHeader)
 	}
 
-	if f.DataRecords == nil {
-		f.DataRecords = []DataRecord{}
+	if f.Records == nil {
+		f.Records = []DataRecord{}
 	}
 
 	var totalBytesRead int
@@ -389,12 +399,13 @@ func (f *File) ReadAndUnmarshal(r io.Reader) (int, error) {
 	var currentDefinitionMessage DataRecord
 
 	dataRecordsBytesLeftToProcess := int(f.Header.DataSize)
+
 	for dataRecordsBytesLeftToProcess > 0 {
 		dr := new(DataRecord)
 
 		ctx := context.Background()
 		if recordsProcessed > 0 {
-			ctx = context.WithValue(ctx, "CURRENT_DEFINITION_RECORD", currentDefinitionMessage)
+			ctx = context.WithValue(ctx, ContextKeyCurrentDefinitionRecord, currentDefinitionMessage)
 		}
 
 		n, err := dr.ReadAndUnmarshal(ctx, r)
@@ -408,7 +419,7 @@ func (f *File) ReadAndUnmarshal(r io.Reader) (int, error) {
 			currentDefinitionMessage = *dr
 		}
 
-		f.DataRecords = append(f.DataRecords, *dr)
+		f.Records = append(f.Records, *dr)
 		recordsProcessed++
 	}
 	return totalBytesRead, nil
